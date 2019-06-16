@@ -78,15 +78,7 @@ fn run_async_processor(brokers: &str, group_id: &str, input_topic: &str, output_
 
     // Create the outer pipeline on the message stream.
     let stream_processor = consumer.start()
-        .filter_map(|result| {  // Filter out errors
-            match result {
-                Ok(msg) => Some(msg),
-                Err(kafka_error) => {
-                    warn!("Error while receiving from Kafka: {:?}", kafka_error);
-                    None
-                }
-            }
-        }).for_each(move |borrowed_message| {     // Process each message
+        .for_each(move |borrowed_message| {     // Process each message
             info!("Message received: {}", borrowed_message.offset());
             // Borrowed messages can't outlive the consumer they are received from, so they need to
             // be owned in order to be sent to a separate thread.

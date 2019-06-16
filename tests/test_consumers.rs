@@ -18,6 +18,7 @@ use crate::utils::*;
 
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use rdkafka::message::BorrowedMessage;
 
 struct TestContext {
     _n: i64, // Add data for memory access validation
@@ -129,20 +130,15 @@ fn test_produce_consume_base() {
 
     let _consumer_future = consumer.start()
         .take(100)
-        .for_each(|message| {
-            match message {
-                Ok(m) => {
-                    let id = message_map[&(m.partition(), m.offset())];
-                    match m.timestamp() {
-                        Timestamp::CreateTime(timestamp) => assert!(timestamp >= start_time),
-                        _ => panic!("Expected createtime for message timestamp")
-                    };
-                    assert_eq!(m.payload_view::<str>().unwrap().unwrap(), value_fn(id));
-                    assert_eq!(m.key_view::<str>().unwrap().unwrap(), key_fn(id));
-                    assert_eq!(m.topic(), topic_name.as_str());
-                },
-                Err(e) => panic!("Error receiving message: {:?}", e)
+        .for_each(|m| {
+            let id = message_map[&(m.partition(), m.offset())];
+            match m.timestamp() {
+                Timestamp::CreateTime(timestamp) => assert!(timestamp >= start_time),
+                _ => panic!("Expected createtime for message timestamp")
             };
+            assert_eq!(m.payload_view::<str>().unwrap().unwrap(), value_fn(id));
+            assert_eq!(m.key_view::<str>().unwrap().unwrap(), key_fn(id));
+            assert_eq!(m.topic(), topic_name.as_str());
             Ok(())
         })
         .wait();
@@ -169,10 +165,7 @@ fn test_produce_consume_base_assign() {
     let _consumer_future = consumer.start()
         .take(19)
         .for_each(|message| {
-            match message {
-                Ok(m) => partition_count[m.partition() as usize] += 1,
-                Err(e) => panic!("Error receiving message: {:?}", e)
-            };
+            partition_count[message.partition() as usize] += 1;
             Ok(())
         })
         .wait();
@@ -192,16 +185,11 @@ fn test_produce_consume_with_timestamp() {
 
     let _consumer_future = consumer.start()
         .take(100)
-        .for_each(|message| {
-            match message {
-                Ok(m) => {
-                    let id = message_map[&(m.partition(), m.offset())];
-                    assert_eq!(m.timestamp(), Timestamp::CreateTime(1111));
-                    assert_eq!(m.payload_view::<str>().unwrap().unwrap(), value_fn(id));
-                    assert_eq!(m.key_view::<str>().unwrap().unwrap(), key_fn(id));
-                },
-                Err(e) => panic!("Error receiving message: {:?}", e)
-            };
+        .for_each(|m| {
+            let id = message_map[&(m.partition(), m.offset())];
+            assert_eq!(m.timestamp(), Timestamp::CreateTime(1111));
+            assert_eq!(m.payload_view::<str>().unwrap().unwrap(), value_fn(id));
+            assert_eq!(m.key_view::<str>().unwrap().unwrap(), key_fn(id));
             Ok(())
         })
         .wait();
@@ -228,8 +216,10 @@ fn test_consume_with_no_message_error() {
     let mut first_poll_time = None;
     let mut timeouts_count = 0;
     for message in message_stream.wait() {
-        match message {
-            Ok(Err(KafkaError::NoMessageReceived)) => {
+        let m: Result<BorrowedMessage, KafkaError> = message;
+        match m {
+            Ok(m) => panic!("A message was actually received: {:?}", m),
+            Err(KafkaError::NoMessageReceived) => {
                 // TODO: use entry interface for Options once available
                 if first_poll_time.is_none() {
                     first_poll_time = Some(Instant::now());
@@ -238,9 +228,8 @@ fn test_consume_with_no_message_error() {
                 if timeouts_count == 26 {
                     break;
                 }
-            }
-            Ok(m) => panic!("A message was actually received: {:?}", m),
-            Err(e) => panic!("Unexpected error while receiving message: {:?}", e)
+            },
+            Err(e) => panic!("Unexpected error while receiving message: {:?}", e),
         };
     }
 
@@ -267,15 +256,13 @@ fn test_consumer_commit_message() {
 
     let _consumer_future = consumer.start()
         .take(33)
-        .for_each(|message| {
-            match message {
-                Ok(m) => {
-                    if m.partition() == 1 {
-                        consumer.commit_message(&m, CommitMode::Async).unwrap();
-                    }
-                },
-                Err(e) => panic!("error receiving message: {:?}", e)
-            };
+        .map_err(|e| {
+            panic!("Error receiving message: {:?}", e)
+        })
+        .for_each(|m| {
+            if m.partition() == 1 {
+                consumer.commit_message(&m, CommitMode::Async).unwrap();
+            }
             Ok(())
         })
         .wait();
@@ -319,25 +306,28 @@ fn test_consumer_store_offset_commit() {
     consumer.subscribe(&[topic_name.as_str()]).unwrap();
 
     let _consumer_future = consumer.start()
-        .take(36)
-        .for_each(|message| {
+        .take(33)
+        .then(|message| {
             match message {
                 Ok(m) => {
                     if m.partition() == 1 {
                         consumer.store_offset(&m).unwrap();
                     }
+                    Ok(())
                 },
-                Err(KafkaError::PartitionEOF(_)) => {},
-                Err(e) => panic!("Error receiving message: {:?}", e)
-            };
-            Ok(())
+                Err(KafkaError::PartitionEOF(p)) => Ok(()),
+                Err(e) => {
+                    Err(e)
+                }
+            }
         })
+        .for_each(|_| Ok(()))
         .wait();
 
     // Commit the whole current state
     consumer.commit_consumer_state(CommitMode::Sync).unwrap();
 
-    let timeout = Duration::from_secs(5);
+    let timeout = Duration::from_secs(15);
     assert_eq!(consumer.fetch_watermarks(&topic_name, 0, timeout).unwrap(), (0, 10));
     assert_eq!(consumer.fetch_watermarks(&topic_name, 1, timeout).unwrap(), (0, 11));
     assert_eq!(consumer.fetch_watermarks(&topic_name, 2, timeout).unwrap(), (0, 12));
