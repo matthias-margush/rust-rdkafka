@@ -7,16 +7,17 @@ extern crate rdkafka_sys;
 use clap::{App, Arg};
 use futures::stream::Stream;
 
-use rdkafka::message::{Message, Headers};
+use rdkafka::message::{Message, Headers, BorrowedMessage};
 use rdkafka::client::ClientContext;
-use rdkafka::consumer::{Consumer, ConsumerContext, CommitMode, Rebalance};
+use rdkafka::consumer::{Consumer, ConsumerContext, CommitMode, Rebalance, MessageStream};
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::config::{ClientConfig, RDKafkaLogLevel};
 use rdkafka::util::get_rdkafka_version;
-use rdkafka::error::KafkaResult;
+use rdkafka::error::{KafkaResult, KafkaError};
 
 mod example_utils;
 use crate::example_utils::setup_logger;
+use std::borrow::Cow::Borrowed;
 
 // A context can be used to change the behavior of producers and consumers by adding callbacks
 // that will be executed by librdkafka.
@@ -62,13 +63,12 @@ fn consume_and_print(brokers: &str, group_id: &str, topics: &[&str]) {
 
     // consumer.start() returns a stream. The stream can be used ot chain together expensive steps,
     // such as complex computations on a thread pool or asynchronous IO.
-    let message_stream = consumer.start();
+    let message_stream : MessageStream<CustomContext>= consumer.start();
 
     for message in message_stream.wait() {
+        let message: Result<BorrowedMessage, KafkaError> = message;
         match message {
-            Err(_) => warn!("Error while reading from stream."),
-            Ok(Err(e)) => warn!("Kafka error: {}", e),
-            Ok(Ok(m)) => {
+            Ok(m) => {
                 let payload = match m.payload_view::<str>() {
                     None => "",
                     Some(Ok(s)) => s,
@@ -87,6 +87,7 @@ fn consume_and_print(brokers: &str, group_id: &str, topics: &[&str]) {
                 }
                 consumer.commit_message(&m, CommitMode::Async).unwrap();
             },
+            Err(e) => warn!("Kafka error: {}", e),
         };
     }
 }

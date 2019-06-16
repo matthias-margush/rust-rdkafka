@@ -27,12 +27,13 @@ use rdkafka::client::ClientContext;
 use rdkafka::config::{ClientConfig, RDKafkaLogLevel};
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::{Consumer, ConsumerContext};
-use rdkafka::error::KafkaResult;
+use rdkafka::error::{KafkaResult, KafkaError};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::get_rdkafka_version;
 
 mod example_utils;
 use crate::example_utils::setup_logger;
+use rdkafka::message::BorrowedMessage;
 
 
 // A simple context to customize the consumer behavior and print a log line every time
@@ -130,14 +131,12 @@ fn main() {
     let producer = create_producer(brokers);
 
     for message in consumer.start().wait() {
+        let message: Result<BorrowedMessage, KafkaError> = message;
         match message {
-            Err(()) => {
-                warn!("Error while reading from stream");
-            }
-            Ok(Err(e)) => {
+            Err(e) => {
                 warn!("Kafka error: {}", e);
             }
-            Ok(Ok(m)) => {
+            Ok(m) => {
                 // Send a copy to the message to every output topic in parallel, and wait for the
                 // delivery report to be received.
                 join_all(

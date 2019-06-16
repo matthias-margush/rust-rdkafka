@@ -1,5 +1,5 @@
 //! Stream-based consumer implementation.
-use futures::{Future, Poll, Sink, Stream};
+use futures::{Future, Poll, Sink, Stream, Async};
 use futures::sync::mpsc;
 use crate::rdsys::types::*;
 use crate::rdsys;
@@ -84,17 +84,22 @@ impl<'a, C: ConsumerContext + 'static> MessageStream<'a, C> {
 }
 
 impl<'a, C: ConsumerContext + 'a> Stream for MessageStream<'a, C> {
-    type Item = KafkaResult<BorrowedMessage<'a>>;
-    type Error = ();
+    type Item = BorrowedMessage<'a>;
+    type Error = KafkaError;
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        self.receiver.poll()
-            .map(|ready|
-                ready.map(|option|
-                    option.map(|polled_ptr_opt|
-                        polled_ptr_opt.map_or(
-                            Err(KafkaError::NoMessageReceived),
-                            |polled_ptr| polled_ptr.into_message_of(self.consumer)))))
+    fn poll(&mut self) -> Poll<Option<BorrowedMessage<'a>>, KafkaError> {
+        match self.receiver.poll() {
+            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Ok(Async::Ready(Some(Some(v)))) => {
+                match v.into_message_of(self.consumer) {
+                    Ok(message) => Ok(Async::Ready(Some(message))),
+                    Err(e) => Err(e),
+                }
+            },
+            Ok(Async::Ready(None)) => Ok(Async::Ready(None)),
+            Ok(Async::Ready(Some(none))) => Err(KafkaError::NoMessageReceived),
+            Err(e) => Err(KafkaError::MessageConsumption(RDKafkaError::Fail)),
+        }
     }
 }
 
